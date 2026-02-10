@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "quantum-cracker"
@@ -13,6 +13,9 @@ dependencies = [
     "qiskit>=1.0",
     "qiskit-aer>=0.13",
     "matplotlib>=3.8",
+    "PyOpenGL>=3.1.7",
+    "glfw>=2.6",
+    "pyrr>=0.10",
 ]
 
 [project.optional-dependencies]
