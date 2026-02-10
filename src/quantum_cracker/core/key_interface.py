@@ -6,10 +6,9 @@ import secrets
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.special import sph_harm_y
 
 from quantum_cracker.utils.constants import GRID_SIZE, NUM_THREADS
-from quantum_cracker.utils.math_helpers import uniform_sphere_points
+from quantum_cracker.utils.math_helpers import build_qr_sh_basis, uniform_sphere_points
 
 
 class KeyInput:
@@ -111,24 +110,10 @@ class KeyInput:
         # Map bits 0/1 -> -1/+1 as SH coefficients
         coeffs = 2.0 * bits - 1.0
 
-        theta = np.linspace(0, np.pi, grid_size)
-        phi = np.linspace(0, 2 * np.pi, grid_size)
-        theta_grid, phi_grid = np.meshgrid(theta, phi, indexing="ij")
-
-        # Sum the first 256 spherical harmonics weighted by key bits
-        # Map bit index i to (l, m): l goes 0,1,1,1,2,2,2,2,2,...
-        # For l, there are 2l+1 values of m, so cumulative count = (l+1)^2
-        angular_field = np.zeros((grid_size, grid_size), dtype=np.float64)
-        bit_idx = 0
-        degree = 0
-        while bit_idx < NUM_THREADS:
-            for m in range(-degree, degree + 1):
-                if bit_idx >= NUM_THREADS:
-                    break
-                ylm = sph_harm_y(degree, m, theta_grid, phi_grid).real
-                angular_field += coeffs[bit_idx] * ylm
-                bit_idx += 1
-            degree += 1
+        # QR-orthogonalized SH basis: perfectly orthogonal on the discrete
+        # grid (condition number 1.0), enabling exact 256/256 bit recovery.
+        basis = build_qr_sh_basis(grid_size, NUM_THREADS)
+        angular_field = (basis @ coeffs).reshape(grid_size, grid_size)
 
         # Normalize to [-1, 1] range
         max_val = np.abs(angular_field).max()

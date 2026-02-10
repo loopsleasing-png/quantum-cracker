@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.special import sph_harm_y
 
-from quantum_cracker.utils.constants import GOLDEN_RATIO
+from quantum_cracker.utils.constants import GOLDEN_RATIO, NUM_THREADS
+
+# Cache for QR-orthogonalized SH bases (keyed by grid_size, n_modes)
+_qr_basis_cache: dict[tuple[int, int], NDArray[np.float64]] = {}
 
 
 def spherical_to_cartesian(
@@ -121,3 +125,62 @@ def nearest_neighbor_gaps(vectors: NDArray[np.float64]) -> NDArray[np.float64]:
     # Set diagonal to infinity so a vector doesn't match itself
     np.fill_diagonal(dists, np.inf)
     return np.min(dists, axis=1)
+
+
+def build_sh_basis(
+    grid_size: int, n_modes: int = NUM_THREADS
+) -> NDArray[np.float64]:
+    """Build raw SH basis matrix on a grid_size x grid_size angular grid.
+
+    Returns:
+        basis: (grid_size^2, n_modes) matrix where column i is Y_{l,m}
+               evaluated on the grid for the first n_modes spherical harmonics.
+    """
+    theta = np.linspace(0, np.pi, grid_size)
+    phi = np.linspace(0, 2 * np.pi, grid_size)
+    theta_grid, phi_grid = np.meshgrid(theta, phi, indexing="ij")
+
+    basis = np.zeros((grid_size * grid_size, n_modes), dtype=np.float64)
+    bit_idx = 0
+    degree = 0
+    while bit_idx < n_modes:
+        for m in range(-degree, degree + 1):
+            if bit_idx >= n_modes:
+                break
+            ylm = sph_harm_y(degree, m, theta_grid, phi_grid).real
+            basis[:, bit_idx] = ylm.ravel()
+            bit_idx += 1
+        degree += 1
+
+    return basis
+
+
+def build_qr_sh_basis(
+    grid_size: int, n_modes: int = NUM_THREADS
+) -> NDArray[np.float64]:
+    """Build QR-orthogonalized SH basis matrix.
+
+    The raw SH basis is only approximately orthogonal on a discrete grid
+    (condition number ~10^17). QR decomposition produces a perfectly
+    orthogonal basis (condition number 1.0), enabling exact coefficient
+    recovery for 256/256 bit extraction.
+
+    Results are cached per (grid_size, n_modes).
+
+    Returns:
+        Q: (grid_size^2, n_modes) orthogonal matrix.
+    """
+    cache_key = (grid_size, n_modes)
+    if cache_key in _qr_basis_cache:
+        return _qr_basis_cache[cache_key]
+
+    raw_basis = build_sh_basis(grid_size, n_modes)
+    n_points = grid_size * grid_size
+    if n_points < n_modes:
+        # Not enough grid points for full QR orthogonalization;
+        # fall back to raw basis (small test grids only).
+        _qr_basis_cache[cache_key] = raw_basis
+        return raw_basis
+    Q, _ = np.linalg.qr(raw_basis)
+    _qr_basis_cache[cache_key] = Q
+    return Q
