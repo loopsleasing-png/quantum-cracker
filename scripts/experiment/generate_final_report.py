@@ -376,6 +376,46 @@ def main():
         "implication": "#1 real-world attack. Defense: RFC 6979 deterministic nonces (Bitcoin Core: immune).",
     })
 
+    # Partial Key Exposure
+    report_rows.append({
+        "experiment": "Partial Key Exposure",
+        "method": "BSGS with known bits, lattice recovery, cold boot/side-channel scenarios",
+        "result": "Need 176/256 bits for feasible recovery (BSGS 2^40)",
+        "signal": "YES (conditional)",
+        "detail": "Cold boot (LN2): 99.9% recovery = trivial. Room temp: 90% = 2^13. 35% error = safe.",
+        "implication": "Physical access + cooling = key recovery. Defense: memory encryption, HSMs.",
+    })
+
+    # Weak RNG / Brain Wallet
+    report_rows.append({
+        "experiment": "Weak RNG / Brain Wallet",
+        "method": "Brain wallets, sequential keys, Android SecureRandom, Profanity, r-value reuse",
+        "result": "All weak-RNG keys trivially recoverable (0-32 bit effective entropy)",
+        "signal": "YES (impl)",
+        "detail": "Brain wallet: instant. Sequential: 4s GPU. Profanity: 4s GPU. Nonce reuse: algebra.",
+        "implication": "#1 cause of real Bitcoin theft. $160M Wintermute. Defense: CSPRNG + RFC 6979.",
+    })
+
+    # Signature Malleability
+    report_rows.append({
+        "experiment": "Signature Malleability",
+        "method": "ECDSA (r,s)->(r,n-s) mutation, txid impact, Schnorr comparison, SegWit analysis",
+        "result": "100% of ECDSA sigs malleable; Schnorr 0% malleable",
+        "signal": "N/A (protocol)",
+        "detail": "Mt. Gox $450M confusion. Low-S (BIP-62) + SegWit (BIP-141) + Schnorr (BIP-340) fix all.",
+        "implication": "Mathematical property, not crypto break. Modern Bitcoin immune via SegWit+Taproot.",
+    })
+
+    # ECDH Security Analysis
+    report_rows.append({
+        "experiment": "ECDH Security Analysis",
+        "method": "CDH=DLP equivalence, static vs ephemeral, invalid curve, TLS 1.3, protocol comparison",
+        "result": "ECDH security = ECDLP hardness; 128-bit for secp256k1",
+        "signal": "N/A (analysis)",
+        "detail": "Forward secrecy requires ECDHE. Invalid curve attack: 100% without validation. 7 protocols analyzed.",
+        "implication": "ECDH secure when: ephemeral keys + point validation + constant-time + twist-secure curve.",
+    })
+
     # Grand Security Proof
     report_rows.append({
         "experiment": "Grand Unified Security Proof",
@@ -401,7 +441,7 @@ def main():
 
     print(f"""
   EXPERIMENTS RUN: {len(report_rows)}
-  TOTAL SCRIPTS: 54 experiment files, ~26,000 lines of code
+  TOTAL SCRIPTS: 58 experiment files, ~30,000 lines of code
   APPROACHES TESTED:
     - 256 mathematical oracles across 10 keys (Phase 1)
     - Differential harmonic analysis on 64 bit positions (Phase 2)
@@ -431,17 +471,25 @@ def main():
     - Quadratic twist security analysis (5 standard curves)
     - Nonce bias attack (reuse, MSB bias, short nonce, Minerva)
     - Grand unified secp256k1 security proof
+    - Partial key exposure (BSGS + cold boot + side channel scaling)
+    - Weak RNG / brain wallet / Profanity / Android SecureRandom
+    - ECDSA signature malleability (Mt. Gox, SegWit, Schnorr)
+    - ECDH key agreement security (CDH=DLP, forward secrecy, TLS 1.3)
 
-  SIGNALS FOUND: 2 mathematical + 5 implementation
+  SIGNALS FOUND: 2 mathematical + 7 implementation + 1 protocol
     Mathematical (require conditions that don't exist):
     1. Shor's algorithm: WORKS, but needs ~2330 logical qubits (we have ~20)
     2. Lattice attack: WORKS, but needs biased ECDSA nonces (modern wallets use RFC 6979)
-    Implementation (require access to signing device):
+    Implementation (require access to signing device or weak software):
     3. Timing side-channel: python-ecdsa vulnerable, libsecp256k1 immune
     4. DPA: works on unprotected hardware, blocked by scalar blinding
     5. Invalid curve: works without validation, blocked by point checking
     6. Fault injection: 100% key recovery, blocked by verify-after-sign
     7. Nonce bias: 90-100% recovery, blocked by RFC 6979
+    8. Weak RNG/brain wallet: instant recovery, blocked by CSPRNG
+    9. Partial key exposure: cold boot with cooling = trivial recovery
+    Protocol (mathematical property, not crypto break):
+    10. Signature malleability: (r,n-s) valid, fixed by SegWit+Schnorr
 
   SIGNALS DEFINITIVELY RULED OUT:
     - Mathematical oracles on EC coordinates: NOISE
