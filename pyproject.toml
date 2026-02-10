@@ -28,6 +28,9 @@ dev = [
     "ipykernel>=6.29",
 ]
 
+[project.scripts]
+quantum-cracker = "quantum_cracker.__main__:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
