@@ -102,14 +102,12 @@ class SphericalVoxelGrid:
         dphi = phi[1] - phi[0] if len(phi) > 1 else 1.0
         weight = np.sin(theta_grid) * dtheta * dphi
 
-        for l in range(min(l_max + 1, self.size)):
-            for m in range(-l, l + 1):
-                # Evaluate Y_l^m on the angular grid
-                ylm = sph_harm_y(l, m, theta_grid, phi_grid).real
-                # For each radial shell, compute inner product
+        for degree in range(min(l_max + 1, self.size)):
+            for m in range(-degree, degree + 1):
+                ylm = sph_harm_y(degree, m, theta_grid, phi_grid).real
                 for ir in range(self.size):
                     shell = self.amplitude[ir, :, :]
-                    coeffs[ir, l, m + l_max] = np.sum(shell * ylm * weight)
+                    coeffs[ir, degree, m + l_max] = np.sum(shell * ylm * weight)
 
         return coeffs
 
@@ -126,11 +124,11 @@ class SphericalVoxelGrid:
 
         for ir in range(self.size):
             shell = np.zeros((self.size, self.size), dtype=np.float64)
-            for l in range(min(l_max + 1, self.size)):
-                for m in range(-l, l + 1):
-                    c = coeffs[ir, l, m + l_max]
+            for degree in range(min(l_max + 1, self.size)):
+                for m in range(-degree, degree + 1):
+                    c = coeffs[ir, degree, m + l_max]
                     if abs(c) > 1e-15:
-                        ylm = sph_harm_y(l, m, theta_grid, phi_grid).real
+                        ylm = sph_harm_y(degree, m, theta_grid, phi_grid).real
                         shell += c * ylm
             self.amplitude[ir, :, :] = shell
 

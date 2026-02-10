@@ -208,7 +208,6 @@ class QuantumRenderer:
         empty space.
         """
         coords = self.grid.get_cartesian_coords()  # (N^3, 3)
-        n = self.grid.size
 
         # Flatten state arrays
         amp_flat = self.grid.amplitude.ravel()

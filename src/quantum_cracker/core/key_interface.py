@@ -8,7 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import sph_harm_y
 
-from quantum_cracker.utils.constants import GRID_SIZE, NUM_THREADS, SH_DEGREE
+from quantum_cracker.utils.constants import GRID_SIZE, NUM_THREADS
 from quantum_cracker.utils.math_helpers import uniform_sphere_points
 
 
@@ -120,15 +120,15 @@ class KeyInput:
         # For l, there are 2l+1 values of m, so cumulative count = (l+1)^2
         angular_field = np.zeros((grid_size, grid_size), dtype=np.float64)
         bit_idx = 0
-        l = 0
+        degree = 0
         while bit_idx < NUM_THREADS:
-            for m in range(-l, l + 1):
+            for m in range(-degree, degree + 1):
                 if bit_idx >= NUM_THREADS:
                     break
-                ylm = sph_harm_y(l, m, theta_grid, phi_grid).real
+                ylm = sph_harm_y(degree, m, theta_grid, phi_grid).real
                 angular_field += coeffs[bit_idx] * ylm
                 bit_idx += 1
-            l += 1
+            degree += 1
 
         # Normalize to [-1, 1] range
         max_val = np.abs(angular_field).max()

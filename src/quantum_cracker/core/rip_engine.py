@@ -13,7 +13,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 from quantum_cracker.utils.constants import (
-    NUM_THREADS,
     OBSERVABLE_THRESHOLD_M,
     PLANCK_LENGTH,
 )

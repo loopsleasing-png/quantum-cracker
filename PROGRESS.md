@@ -12,26 +12,40 @@
 - [x] Project structure scaffolded
 - [x] Root documentation files created
 - [x] Claude Code memory configured
-- [ ] Python environment and dependencies set up
+- [x] Python environment and dependencies set up
 - [ ] CI/CD pipeline configured
 
-## Phase 2: Core Framework
-- [ ] Quantum circuit builder
-- [ ] Superposition state preparation
-- [ ] Measurement/observable framework
-- [ ] Data collection pipeline
+## Phase 2: Core Engines
+- [x] Key input interface (hex, binary, int, bytes + CLI)
+- [x] 78x78x78 spherical voxel grid with SH decomposition
+- [x] 256-thread rip engine with visibility detection
+- [x] Harmonic compiler (78 MHz resonance + peak extraction)
+- [x] Hamiltonian eigenvalue computation
 
 ## Phase 3: Analysis
-- [ ] Observable metric extraction
-- [ ] Superposition relational analysis
-- [ ] Statistical validation
-- [ ] Visualization suite
+- [x] Resonance peak statistics
+- [x] Thread separation timeline
+- [x] Peak-to-key-bit reconstruction
+- [x] Statistical validation (bit match rate, confidence intervals)
+- [x] Ghost harmonic detection
 
-## Phase 4: Proof & Reporting
-- [ ] Experiment runner
-- [ ] Results aggregation
-- [ ] Report generation
-- [ ] Documentation
+## Phase 4: Visualization
+- [x] Spherical harmonic heatmap (Mollweide projection)
+- [x] Thread gap vs time plot
+- [x] Energy landscape spectrum
+- [x] Key comparison bar chart
+- [x] 3D peak distribution scatter
+- [x] PyOpenGL 3D renderer (voxel cloud + thread lines)
+
+## Phase 5: Integration
+- [x] CLI entry point (simulate + visualize commands)
+- [x] CSV export to ~/Desktop
+- [x] End-to-end pipeline
+
+## Phase 6: Polish
+- [ ] CI/CD pipeline
+- [ ] Type annotations + mypy clean
+- [ ] Performance optimization (precomputed SH basis)
 
 ---
 
@@ -39,3 +53,12 @@
 | Date | Feature | Notes |
 |------|---------|-------|
 | 2026-02-09 | Project scaffold | Initial setup with full workflow |
+| 2026-02-09 | Foundation utilities | Constants, types, math helpers (29 tests) |
+| 2026-02-09 | Key interface | Multi-format 256-bit key input (34 tests) |
+| 2026-02-09 | Voxel grid | 78^3 spherical grid with SH decompose/reconstruct (21 tests) |
+| 2026-02-09 | Rip engine | 256-thread expansion with visibility detection (17 tests) |
+| 2026-02-09 | Harmonic compiler | 78 MHz resonance, SH filter, peak extraction (19 tests) |
+| 2026-02-09 | Analysis layer | Metrics + statistical validation (27 tests) |
+| 2026-02-09 | 2D visualization | 5 Matplotlib plot types (12 tests) |
+| 2026-02-09 | 3D renderer | PyOpenGL with GLSL shaders (9 tests) |
+| 2026-02-09 | CLI + integration | Full pipeline with CSV export (6 tests) |

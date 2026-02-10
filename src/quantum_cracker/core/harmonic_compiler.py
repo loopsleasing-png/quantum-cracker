@@ -13,7 +13,7 @@ from numpy.typing import NDArray
 from scipy.ndimage import maximum_filter
 from scipy.special import sph_harm_y
 
-from quantum_cracker.utils.constants import GRID_SIZE, RESONANCE_FREQ_MHZ, SH_DEGREE
+from quantum_cracker.utils.constants import RESONANCE_FREQ_MHZ, SH_DEGREE
 from quantum_cracker.utils.types import Peak, SimulationConfig
 
 from quantum_cracker.core.voxel_grid import SphericalVoxelGrid

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import csv
 import os
-import sys
 from datetime import datetime
 
 from quantum_cracker import __version__
