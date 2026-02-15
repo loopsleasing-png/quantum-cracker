@@ -8,6 +8,9 @@ Implements three evolution modes for the parity Hamiltonian:
 The PDQM-specific innovation: pair spin flips (parity-preserving) run at
 rate t2 (unsuppressed), while single spin flips (parity-flipping) run at
 rate t1 = t0 * exp(-Delta_E / kT) (exponentially suppressed at low T).
+
+For large curves (N > 20), uses ECEnergyEvaluator for O(1) constraint
+evaluation per spin flip via incremental point addition.
 """
 
 from __future__ import annotations
@@ -30,7 +33,8 @@ def compute_parity(spins: NDArray[np.int8]) -> int:
 
     Product of all spins: +1 if even number of -1 spins, -1 if odd.
     """
-    return int(np.prod(spins))
+    n_minus = int(np.sum(spins == -1))
+    return 1 if n_minus % 2 == 0 else -1
 
 
 class ParityDynamics:
@@ -46,11 +50,7 @@ class ParityDynamics:
         self.history: list[DynamicsSnapshot] = []
 
     def _t1_effective(self, temperature: float) -> float:
-        """Compute effective single-particle hopping rate.
-
-        t1(T) = t1_base * exp(-Delta_E / kT)
-        Exponentially suppressed at low temperature.
-        """
+        """t1(T) = t1_base * exp(-Delta_E / kT). Suppressed at low T."""
         if temperature <= 0:
             return 0.0
         return self.config.t1_base * np.exp(
@@ -63,15 +63,26 @@ class ParityDynamics:
         spins: NDArray[np.int8],
         target_key: int | None = None,
     ) -> DynamicsSnapshot:
-        """Create a dynamics snapshot."""
-        energy = self.hamiltonian.energy(spins)
+        """Create a dynamics snapshot without re-syncing the evaluator."""
+        # Compute energy from Ising terms only (avoid re-syncing evaluator)
+        e = 0.0
+        if self.hamiltonian._h_fields is not None:
+            e += float(np.dot(self.hamiltonian._h_fields, spins))
+        for (i, j), j_val in self.hamiltonian._j_couplings.items():
+            e += j_val * spins[i] * spins[j]
+        # Constraint from evaluator (already in sync) or diagonal
+        if self.hamiltonian._constraint_diagonal is not None:
+            idx = ParityHamiltonian._spins_to_index(spins, len(spins))
+            e += self.hamiltonian.config.constraint_weight * self.hamiltonian._constraint_diagonal[idx]
+        elif self.hamiltonian._ec_evaluator is not None:
+            e += self.hamiltonian.config.constraint_weight * self.hamiltonian._ec_evaluator.constraint_penalty()
+
         parity = compute_parity(spins)
         magnetization = float(np.mean(spins))
         overlap = None
         if target_key is not None:
             recovered = ParityHamiltonian.spins_to_key(spins)
             n = len(spins)
-            # Bit overlap: fraction of matching bits
             xor = recovered ^ target_key
             matching = n - bin(xor).count("1")
             overlap = matching / n
@@ -79,7 +90,7 @@ class ParityDynamics:
         return DynamicsSnapshot(
             step=step,
             spins=spins.copy(),
-            energy=energy,
+            energy=e,
             parity=parity,
             magnetization=magnetization,
             overlap_with_target=overlap,
@@ -91,16 +102,9 @@ class ParityDynamics:
         t_final: float,
         dt: float,
     ) -> list[DynamicsSnapshot]:
-        """Exact Schrodinger evolution via eigendecomposition.
-
-        |psi(t)> = sum_n c_n * exp(-i*E_n*t) |n>
-
-        Only feasible for N <= 20.
-        """
+        """Exact Schrodinger evolution via eigendecomposition (N <= 20)."""
         H = self.hamiltonian.to_matrix()
         eigenvalues, eigenvectors = scipy.linalg.eigh(H)
-
-        # Project initial state onto eigenbasis
         coeffs = eigenvectors.T @ psi0
 
         snapshots = []
@@ -109,14 +113,9 @@ class ParityDynamics:
 
         for step in range(n_steps + 1):
             t = step * dt
-            # Evolve in eigenbasis
             phases = np.exp(-1j * eigenvalues * t)
             psi_t = eigenvectors @ (coeffs * phases)
-
-            # Probability distribution over basis states
             probs = np.abs(psi_t) ** 2
-
-            # Most probable state
             max_idx = int(np.argmax(probs))
             spins = ParityHamiltonian._index_to_spins(max_idx, n)
             energy = float(eigenvalues @ (np.abs(coeffs) ** 2))
@@ -145,13 +144,8 @@ class ParityDynamics:
     ) -> list[DynamicsSnapshot]:
         """Glauber dynamics with PDQM-specific flip rates.
 
-        Each sweep consists of N single-spin update attempts and
-        N pair-spin update attempts. The key PDQM innovation:
-
-        - Single-spin flips have acceptance rate multiplied by t1/t2
-          (exponentially suppressed at low T, because they flip parity)
-        - Pair-spin flips have standard Metropolis acceptance
-          (parity-preserving, unsuppressed)
+        Single-spin flips: acceptance *= t1/t2 (parity-flipping, suppressed)
+        Pair-spin flips: standard Metropolis (parity-preserving, unsuppressed)
         """
         if rng is None:
             rng = np.random.default_rng()
@@ -160,6 +154,8 @@ class ParityDynamics:
 
         n = self.hamiltonian.n_spins
         spins = sigma0.copy()
+        self.hamiltonian.sync_evaluator(spins)
+
         t1 = self._t1_effective(temperature)
         t2 = self.config.t2
         parity_suppression = t1 / t2 if t2 > 0 else 0.0
@@ -169,37 +165,34 @@ class ParityDynamics:
         snapshots.append(self._snapshot(0, spins, target_key))
 
         for sweep in range(1, n_sweeps + 1):
-            # -- Single-spin updates (parity-flipping, suppressed) --
+            # Single-spin updates (parity-flipping, suppressed)
             for _ in range(n):
-                i = rng.integers(0, n)
+                i = int(rng.integers(0, n))
                 dE = self.hamiltonian.energy_change_single_flip(spins, i)
 
-                # Metropolis acceptance * parity suppression factor
                 if dE <= 0:
                     accept_prob = parity_suppression
                 else:
                     accept_prob = parity_suppression * np.exp(-beta * dE)
 
                 if rng.random() < accept_prob:
-                    spins[i] *= -1
+                    self.hamiltonian.apply_single_flip(spins, i)
 
-            # -- Pair-spin updates (parity-preserving, unsuppressed) --
+            # Pair-spin updates (parity-preserving, unsuppressed)
             for _ in range(n):
-                i = rng.integers(0, n)
-                j = rng.integers(0, n)
+                i = int(rng.integers(0, n))
+                j = int(rng.integers(0, n))
                 if i == j:
                     continue
                 dE = self.hamiltonian.energy_change_pair_flip(spins, i, j)
 
-                # Standard Metropolis (no suppression for pair flips)
                 if dE <= 0:
                     accept_prob = 1.0
                 else:
                     accept_prob = np.exp(-beta * dE)
 
                 if rng.random() < accept_prob:
-                    spins[i] *= -1
-                    spins[j] *= -1
+                    self.hamiltonian.apply_pair_flip(spins, i, j)
 
             if sweep % log_interval == 0 or sweep == n_sweeps:
                 snapshots.append(self._snapshot(sweep, spins, target_key))
@@ -216,11 +209,7 @@ class ParityDynamics:
         log_interval: int = 10,
         rng: np.random.Generator | None = None,
     ) -> list[DynamicsSnapshot]:
-        """Standard Metropolis MCMC (no parity weighting).
-
-        This is the BASELINE for comparison: single-spin flips only,
-        no pair updates, no parity suppression. Standard textbook MCMC.
-        """
+        """Standard Metropolis MCMC (no parity weighting). Baseline."""
         if rng is None:
             rng = np.random.default_rng()
         if temperature is None:
@@ -228,6 +217,8 @@ class ParityDynamics:
 
         n = self.hamiltonian.n_spins
         spins = sigma0.copy()
+        self.hamiltonian.sync_evaluator(spins)
+
         beta = 1.0 / temperature if temperature > 0 else float("inf")
 
         snapshots = []
@@ -235,13 +226,13 @@ class ParityDynamics:
 
         for sweep in range(1, n_sweeps + 1):
             for _ in range(n):
-                i = rng.integers(0, n)
+                i = int(rng.integers(0, n))
                 dE = self.hamiltonian.energy_change_single_flip(spins, i)
 
                 if dE <= 0:
-                    spins[i] *= -1
+                    self.hamiltonian.apply_single_flip(spins, i)
                 elif rng.random() < np.exp(-beta * dE):
-                    spins[i] *= -1
+                    self.hamiltonian.apply_single_flip(spins, i)
 
             if sweep % log_interval == 0 or sweep == n_sweeps:
                 snapshots.append(self._snapshot(sweep, spins, target_key))
@@ -256,18 +247,7 @@ class ParityDynamics:
         target_key: int | None = None,
         rng: np.random.Generator | None = None,
     ) -> list[AnnealResult]:
-        """Simulated quantum annealing with parity-adaptive schedule.
-
-        For each read:
-        1. Start from random spin configuration
-        2. Decrease temperature from high to low following schedule
-        3. At each step, apply parity-weighted Glauber dynamics
-        4. Record final configuration
-
-        The parity-adaptive schedule adds an even-parity coherence
-        boost: when the current configuration has even parity, the
-        effective temperature is lowered by a factor related to Delta_E.
-        """
+        """Simulated quantum annealing with parity-adaptive schedule."""
         if rng is None:
             rng = np.random.default_rng()
         if schedule is None:
@@ -278,6 +258,8 @@ class ParityDynamics:
 
         for read in range(n_reads):
             spins = rng.choice([-1, 1], size=n).astype(np.int8)
+            self.hamiltonian.sync_evaluator(spins)
+
             trajectory: list[DynamicsSnapshot] = []
             n_parity_flips = 0
             prev_parity = compute_parity(spins)
@@ -285,7 +267,6 @@ class ParityDynamics:
             for step in range(schedule.n_steps):
                 frac = step / max(schedule.n_steps - 1, 1)
 
-                # Temperature schedule
                 if schedule.schedule_type == "linear":
                     beta = (
                         schedule.beta_initial
@@ -300,9 +281,8 @@ class ParityDynamics:
                         schedule.beta_initial
                         + frac * (schedule.beta_final - schedule.beta_initial)
                     )
-                    # Parity coherence boost
                     current_parity = compute_parity(spins)
-                    if current_parity == 1:  # even parity
+                    if current_parity == 1:
                         beta *= 1.0 + self.config.delta_e * frac
 
                 temperature = 1.0 / beta if beta > 0 else float("inf")
@@ -311,18 +291,18 @@ class ParityDynamics:
                 parity_suppression = t1 / t2 if t2 > 0 else 0.0
 
                 # Single-spin update (suppressed)
-                i = rng.integers(0, n)
+                i = int(rng.integers(0, n))
                 dE = self.hamiltonian.energy_change_single_flip(spins, i)
                 if dE <= 0:
                     accept = parity_suppression
                 else:
                     accept = parity_suppression * np.exp(-beta * dE)
                 if rng.random() < accept:
-                    spins[i] *= -1
+                    self.hamiltonian.apply_single_flip(spins, i)
 
                 # Pair-spin update (unsuppressed)
-                i = rng.integers(0, n)
-                j = rng.integers(0, n)
+                i = int(rng.integers(0, n))
+                j = int(rng.integers(0, n))
                 if i != j:
                     dE = self.hamiltonian.energy_change_pair_flip(spins, i, j)
                     if dE <= 0:
@@ -330,16 +310,13 @@ class ParityDynamics:
                     else:
                         accept = np.exp(-beta * dE)
                     if rng.random() < accept:
-                        spins[i] *= -1
-                        spins[j] *= -1
+                        self.hamiltonian.apply_pair_flip(spins, i, j)
 
-                # Track parity flips
                 new_parity = compute_parity(spins)
                 if new_parity != prev_parity:
                     n_parity_flips += 1
                     prev_parity = new_parity
 
-                # Log trajectory sparsely
                 if step % max(schedule.n_steps // 20, 1) == 0:
                     trajectory.append(
                         self._snapshot(step, spins, target_key)

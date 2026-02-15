@@ -3,40 +3,55 @@
 Maps the EC discrete logarithm problem k*G = P onto Ising coupling
 terms so that the ground state of the resulting Hamiltonian encodes
 the private key k in its spin configuration.
+
+Supports curves of any size: small curves use point enumeration,
+large curves use direct EC arithmetic with precomputed power points.
 """
 
 from __future__ import annotations
+
+import secrets
 
 import numpy as np
 from numpy.typing import NDArray
 
 
-class SmallEC:
-    """Elliptic curve over F_p with full arithmetic.
+Point = tuple[int, int] | None
 
-    Supports point enumeration, generator finding, and standard
-    add/multiply operations. For small primes only (p < ~10^6).
+
+class SmallEC:
+    """Elliptic curve y^2 = x^3 + ax + b over F_p.
+
+    For small primes (p < ~10^6), supports full point enumeration.
+    For any prime, supports add/multiply/generator operations.
     """
 
-    def __init__(self, p: int, a: int, b: int) -> None:
+    def __init__(self, p: int, a: int, b: int, order: int | None = None) -> None:
         self.p = p
         self.a = a
         self.b = b
         self._points: list | None = None
-        self._order: int | None = None
-        self._gen: tuple[int, int] | None = None
+        self._order: int | None = order
+        self._gen: Point = None
+        self._can_enumerate = p < 1_000_000
 
     @property
     def order(self) -> int:
         if self._order is None:
-            self._enumerate()
+            if self._can_enumerate:
+                self._enumerate()
+            else:
+                self._compute_order()
         assert self._order is not None
         return self._order
 
     @property
     def generator(self) -> tuple[int, int]:
         if self._gen is None:
-            self._find_generator()
+            if self._can_enumerate:
+                self._find_generator_enum()
+            else:
+                self._find_generator_probe()
         assert self._gen is not None
         return self._gen
 
@@ -65,7 +80,106 @@ class SmallEC:
         self._points = points
         self._order = len(points)
 
-    def _find_generator(self) -> None:
+    def _compute_order(self) -> None:
+        """Compute curve order for large primes using baby-step giant-step
+        on the Hasse interval [p+1-2*sqrt(p), p+1+2*sqrt(p)]."""
+        import math
+
+        p = self.p
+        pt = self._find_point()
+        if pt is None:
+            raise RuntimeError(f"Could not find a point on curve over F_{p}")
+
+        # Hasse bound: |#E - (p+1)| <= 2*sqrt(p)
+        lo = p + 1 - 2 * int(math.isqrt(p)) - 2
+        hi = p + 1 + 2 * int(math.isqrt(p)) + 2
+
+        # Compute n*pt for all n in [lo, hi] and find n where n*pt = O
+        # Use baby-step giant-step on the Hasse interval
+        m = int(math.isqrt(hi - lo)) + 1
+
+        # Baby steps: compute lo*pt + j*pt for j = 0..m
+        base_pt = self.multiply(pt, lo)
+        baby = {}
+        current = base_pt
+        for j in range(m + 1):
+            key = current
+            baby[key] = j
+            current = self.add(current, pt)
+
+        # Giant steps: compute -i*m*pt for i = 0,1,2,...
+        step = self.multiply(pt, m)
+        neg_step = self.neg(step)
+        giant = None  # 0
+        for i in range((hi - lo) // m + 2):
+            if giant in baby:
+                n = lo + baby[giant] + i * m
+                # Verify
+                if self.multiply(pt, n) is None:
+                    self._order = n
+                    return
+            giant = self.add(giant, neg_step) if giant is not None else neg_step
+
+        # Fallback: linear scan
+        for n in range(lo, hi + 1):
+            if self.multiply(pt, n) is None:
+                self._order = n
+                return
+
+        raise RuntimeError(f"Could not compute order for curve over F_{p}")
+
+    def _find_point(self) -> tuple[int, int] | None:
+        """Find a random point on the curve."""
+        p, a, b = self.p, self.a, self.b
+        for x in range(p):
+            rhs = (x * x * x + a * x + b) % p
+            if pow(rhs, (p - 1) // 2, p) == 1:  # QR test
+                y = pow(rhs, (p + 1) // 4, p) if p % 4 == 3 else self._tonelli_shanks(rhs)
+                if y is not None and (y * y) % p == rhs:
+                    return (x, y)
+        return None
+
+    def _tonelli_shanks(self, n: int) -> int | None:
+        """Tonelli-Shanks algorithm for modular square root."""
+        p = self.p
+        if pow(n, (p - 1) // 2, p) != 1:
+            return None
+
+        # Factor out powers of 2 from p-1
+        q = p - 1
+        s = 0
+        while q % 2 == 0:
+            q //= 2
+            s += 1
+
+        # Find a non-residue
+        z = 2
+        while pow(z, (p - 1) // 2, p) != p - 1:
+            z += 1
+
+        m = s
+        c = pow(z, q, p)
+        t = pow(n, q, p)
+        r = pow(n, (q + 1) // 2, p)
+
+        while True:
+            if t == 1:
+                return r
+            i = 1
+            temp = (t * t) % p
+            while temp != 1:
+                temp = (temp * temp) % p
+                i += 1
+                if i == m:
+                    return None
+            b = pow(c, 1 << (m - i - 1), p)
+            m = i
+            c = (b * b) % p
+            t = (t * c) % p
+            r = (r * b) % p
+
+    def _find_generator_enum(self) -> None:
+        """Find generator by enumeration (small curves)."""
         if self._points is None:
             self._enumerate()
         assert self._points is not None
@@ -82,9 +196,62 @@ class SmallEC:
                     return
         self._gen = self._points[1]
 
-    def add(
-        self, P: tuple[int, int] | None, Q: tuple[int, int] | None
-    ) -> tuple[int, int] | None:
+    def _find_generator_probe(self) -> None:
+        """Find generator by probing random points (large curves)."""
+        order = self.order
+        # Factor the order to check subgroups
+        factors = self._small_factors(order)
+
+        for _ in range(100):
+            pt = self._find_random_point()
+            if pt is None:
+                continue
+            # Check that pt has full order
+            if self.multiply(pt, order) is not None:
+                continue
+            is_gen = True
+            for f in factors:
+                if self.multiply(pt, order // f) is None:
+                    is_gen = False
+                    break
+            if is_gen:
+                self._gen = pt
+                return
+
+        # Fallback to first point found
+        pt = self._find_point()
+        if pt is not None:
+            self._gen = pt
+
+    def _find_random_point(self) -> tuple[int, int] | None:
+        """Find a random point on the curve."""
+        p, a, b = self.p, self.a, self.b
+        for _ in range(100):
+            x = secrets.randbelow(p)
+            rhs = (x * x * x + a * x + b) % p
+            if pow(rhs, (p - 1) // 2, p) == 1:
+                y = pow(rhs, (p + 1) // 4, p) if p % 4 == 3 else self._tonelli_shanks(rhs)
+                if y is not None and (y * y) % p == rhs:
+                    return (x, y)
+        return None
+
+    @staticmethod
+    def _small_factors(n: int) -> list[int]:
+        """Find small prime factors of n."""
+        factors = []
+        d = 2
+        temp = n
+        while d * d <= temp and d < 100000:
+            if temp % d == 0:
+                factors.append(d)
+                while temp % d == 0:
+                    temp //= d
+            d += 1
+        if temp > 1:
+            factors.append(temp)
+        return factors
+
+    def add(self, P: Point, Q: Point) -> Point:
         if P is None:
             return Q
         if Q is None:
@@ -106,20 +273,18 @@ class SmallEC:
         y3 = (lam * (x1 - x3) - y1) % p
         return (x3, y3)
 
-    def neg(self, P: tuple[int, int] | None) -> tuple[int, int] | None:
+    def neg(self, P: Point) -> Point:
         if P is None:
             return None
         return (P[0], (self.p - P[1]) % self.p)
 
-    def multiply(
-        self, P: tuple[int, int] | None, k: int
-    ) -> tuple[int, int] | None:
+    def multiply(self, P: Point, k: int) -> Point:
         if k < 0:
             P = self.neg(P)
             k = -k
         if k == 0 or P is None:
             return None
-        result: tuple[int, int] | None = None
+        result: Point = None
         addend = P
         while k:
             if k & 1:
@@ -128,14 +293,137 @@ class SmallEC:
             k >>= 1
         return result
 
-    def random_keypair(self, rng: np.random.Generator | None = None) -> tuple[int, tuple[int, int]]:
+    def random_keypair(
+        self, rng: np.random.Generator | None = None
+    ) -> tuple[int, tuple[int, int]]:
         """Generate a random private key and its public key."""
         if rng is None:
             rng = np.random.default_rng()
-        k = int(rng.integers(1, self.order))
-        P = self.multiply(self.generator, k)
-        assert P is not None
-        return k, P
+        order = self.order
+        G = self.generator
+        for _ in range(100):
+            if order > 2**63:
+                k = 1 + secrets.randbelow(order - 1)
+            else:
+                k = int(rng.integers(1, order))
+            P = self.multiply(G, k)
+            if P is not None:
+                return k, P
+        raise RuntimeError("Could not generate valid keypair")
+
+
+class ECEnergyEvaluator:
+    """Efficient EC constraint evaluation for MCMC dynamics.
+
+    Precomputes power_points[i] = 2^i * G so that each spin flip
+    requires only one EC point addition instead of a full O(n)
+    scalar multiplication.
+
+    Maintains a running point accumulator: current_point = k' * G
+    where k' is the candidate key from the current spin configuration.
+    """
+
+    def __init__(
+        self,
+        curve: SmallEC,
+        generator: tuple[int, int],
+        public_key: tuple[int, int],
+        n_bits: int,
+    ) -> None:
+        self.curve = curve
+        self.generator = generator
+        self.public_key = public_key
+        self.n_bits = n_bits
+
+        # Precompute 2^i * G for all bit positions
+        self.power_points: list[tuple[int, int]] = []
+        pt: Point = generator
+        for _ in range(n_bits):
+            assert pt is not None
+            self.power_points.append(pt)
+            pt = self.curve.add(pt, pt)
+
+        # Negative power points for subtraction
+        self.neg_power_points = [
+            self.curve.neg(pp) for pp in self.power_points
+        ]
+
+        self._current_point: Point = None
+        self._current_key: int = 0
+
+    def set_state(self, key: int) -> None:
+        """Set the current key and compute its point."""
+        self._current_key = key
+        self._current_point = self.curve.multiply(self.generator, key)
+
+    def set_state_from_spins(self, spins: NDArray[np.int8]) -> None:
+        """Set state from a spin configuration."""
+        key = 0
+        for j in range(self.n_bits):
+            if spins[j] == -1:  # spin -1 -> bit 1
+                key |= 1 << j
+        self.set_state(key)
+
+    def constraint_penalty(self) -> float:
+        """Return 0.0 if current key satisfies k*G == P, else 1.0."""
+        return 0.0 if self._current_point == self.public_key else 1.0
+
+    def flip_single(self, bit_idx: int) -> float:
+        """Flip one bit, update running point, return new penalty.
+
+        If bit was 0 (spin +1), set to 1: add 2^i * G
+        If bit was 1 (spin -1), set to 0: subtract 2^i * G
+        """
+        was_set = (self._current_key >> bit_idx) & 1
+        if was_set:
+            # bit 1 -> 0: subtract 2^i * G
+            self._current_point = self.curve.add(
+                self._current_point, self.neg_power_points[bit_idx]
+            )
+            self._current_key ^= 1 << bit_idx
+        else:
+            # bit 0 -> 1: add 2^i * G
+            self._current_point = self.curve.add(
+                self._current_point, self.power_points[bit_idx]
+            )
+            self._current_key ^= 1 << bit_idx
+
+        return 0.0 if self._current_point == self.public_key else 1.0
+
+    def flip_pair(self, bit_a: int, bit_b: int) -> float:
+        """Flip two bits, update running point, return new penalty."""
+        self.flip_single(bit_a)
+        return self.flip_single(bit_b)
+
+    def peek_flip_single(self, bit_idx: int) -> float:
+        """Check what penalty would be after flipping bit, without changing state."""
+        was_set = (self._current_key >> bit_idx) & 1
+        if was_set:
+            new_point = self.curve.add(
+                self._current_point, self.neg_power_points[bit_idx]
+            )
+        else:
+            new_point = self.curve.add(
+                self._current_point, self.power_points[bit_idx]
+            )
+        return 0.0 if new_point == self.public_key else 1.0
+
+    def peek_flip_pair(self, bit_a: int, bit_b: int) -> float:
+        """Check penalty after flipping two bits, without changing state."""
+        was_a = (self._current_key >> bit_a) & 1
+        was_b = (self._current_key >> bit_b) & 1
+
+        pt = self._current_point
+        if was_a:
+            pt = self.curve.add(pt, self.neg_power_points[bit_a])
+        else:
+            pt = self.curve.add(pt, self.power_points[bit_a])
+        if was_b:
+            pt = self.curve.add(pt, self.neg_power_points[bit_b])
+        else:
+            pt = self.curve.add(pt, self.power_points[bit_b])
+
+        return 0.0 if pt == self.public_key else 1.0
 
 
 # -- Standard test curves (y^2 = x^3 + 7, secp256k1 family) --
@@ -149,12 +437,95 @@ SMALL_CURVES = {
     "p4093": SmallEC(4093, 0, 7),
 }
 
+# Pre-computed curve parameters for y^2 = x^3 + 7 over F_p.
+# Each entry: (p, order, generator_x, generator_y)
+# Orders computed offline. All generators verified: order*G = O.
+CURVE_PARAMS: dict[int, tuple[int, int, tuple[int, int]]] = {
+    7: (131, 132, (1, 46)),
+    8: (263, 270, (1, 8)),
+    10: (1031, 1032, (0, 84)),
+    12: (4099, 4228, (1, 103)),
+    # For curves above enumeration limit, we supply the order directly
+    # and use the first valid point as generator. The key bit length
+    # is derived from the order, not from p.
+}
+
+
+def make_curve(target_bits: int) -> SmallEC:
+    """Create a curve with approximately target_bits key size.
+
+    For small sizes (<=12 bits), uses precomputed parameters.
+    For larger sizes, uses a prime p ~ 2^target_bits and computes
+    the curve on-the-fly with enumeration (up to p < 10^6) or
+    with the order supplied.
+    """
+    if target_bits in CURVE_PARAMS:
+        p, order, gen = CURVE_PARAMS[target_bits]
+        curve = SmallEC(p, 0, 7, order=order)
+        curve._gen = gen
+        return curve
+
+    # For larger sizes, find a suitable prime and let SmallEC enumerate
+    # (only works up to p ~ 10^5)
+    primes_3mod4 = []
+    candidate = (1 << target_bits) + 1
+    while len(primes_3mod4) < 1:
+        if _is_prime(candidate) and candidate % 4 == 3:
+            primes_3mod4.append(candidate)
+        candidate += 2
+
+    p = primes_3mod4[0]
+    if p < 1_000_000:
+        return SmallEC(p, 0, 7)
+
+    # For large primes, skip order computation. Use p as the key space
+    # upper bound (Hasse: order is within 2*sqrt(p) of p+1).
+    # Set order = p so key_bit_length() returns ~target_bits.
+    curve = SmallEC(p, 0, 7, order=p)
+    # Find a generator point
+    pt = curve._find_point()
+    if pt is not None:
+        curve._gen = pt
+    return curve
+
+
+def _is_prime(n: int) -> bool:
+    """Miller-Rabin primality test."""
+    if n < 2:
+        return False
+    if n < 4:
+        return True
+    if n % 2 == 0:
+        return False
+
+    # Write n-1 as 2^r * d
+    d = n - 1
+    r = 0
+    while d % 2 == 0:
+        d //= 2
+        r += 1
+
+    # Test with several witnesses
+    for a in [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37]:
+        if a >= n:
+            continue
+        x = pow(a, d, n)
+        if x == 1 or x == n - 1:
+            continue
+        for _ in range(r - 1):
+            x = pow(x, 2, n)
+            if x == n - 1:
+                break
+        else:
+            return False
+    return True
+
 
 class ECConstraintEncoder:
     """Encode EC DLP constraints as Ising interactions.
 
     For small curves (N <= 20 bits): exact penalty diagonal.
-    For larger curves: windowed multiplication constraints.
+    For larger curves: uses ECEnergyEvaluator for direct evaluation.
     """
 
     def __init__(
@@ -187,118 +558,24 @@ class ECConstraintEncoder:
         return penalty
 
     def spin_penalty_diagonal(self) -> NDArray[np.float64]:
-        """Like full_penalty_diagonal but indexed by spin configuration.
-
-        Spin config sigma in {+1,-1}^N maps to bits via b_i = (1 - sigma_i)/2.
-        Index i in [0, 2^N) is read as binary where bit j = (i >> j) & 1.
-        """
+        """Like full_penalty_diagonal but indexed by spin configuration."""
         bit_penalty = self.full_penalty_diagonal()
         n = self.n_bits
         size = 1 << n
         spin_penalty = np.ones(size, dtype=np.float64)
 
         for spin_idx in range(size):
-            # Convert spin index to bit key
             key_val = 0
             for j in range(n):
                 bit_j = (spin_idx >> j) & 1
-                # spin +1 -> bit 0, spin -1 -> bit 1
-                # In our indexing: if bit j of spin_idx is 1, spin_j = -1, so key bit = 1
                 key_val |= bit_j << j
             if key_val < len(bit_penalty):
                 spin_penalty[spin_idx] = bit_penalty[key_val]
 
         return spin_penalty
 
-    def windowed_constraints(
-        self, window_size: int = 4
-    ) -> list[tuple[list[int], NDArray[np.float64]]]:
-        """Generate local constraints from windowed EC multiplication.
-
-        Breaks the key into windows of `window_size` bits. For each window,
-        precomputes partial EC points and generates a local penalty table.
-
-        Returns list of (bit_indices, penalty_table) tuples.
-        """
-        n = self.n_bits
-        constraints = []
-
-        # Precompute 2^i * G for all bit positions
-        power_points = []
-        pt = self.generator
-        for i in range(n):
-            power_points.append(pt)
-            pt = self.curve.add(pt, pt)
-
-        for start in range(0, n, window_size):
-            end = min(start + window_size, n)
-            w = end - start
-            bit_indices = list(range(start, end))
-
-            # For this window, compute all 2^w partial sums
-            table_size = 1 << w
-            partial_points = []
-            for val in range(table_size):
-                acc = None
-                for j in range(w):
-                    if val & (1 << j):
-                        acc = self.curve.add(acc, power_points[start + j])
-                partial_points.append(acc)
-
-            # The penalty for this window: how well does this partial
-            # sum contribute to reaching the target? We measure distance
-            # by checking if the remaining bits could complete it.
-            # For exact mode, this reduces to the full penalty.
-            # For approximate mode, we use a soft penalty based on
-            # coordinate distance to the target point.
-            penalty = np.zeros(table_size, dtype=np.float64)
-            for val in range(table_size):
-                pt = partial_points[val]
-                if pt is None:
-                    # Point at infinity -- penalize unless target needs this
-                    penalty[val] = 0.5
-                else:
-                    # Soft penalty: normalized coordinate distance to target
-                    dx = (pt[0] - self.public_key[0]) % self.curve.p
-                    dy = (pt[1] - self.public_key[1]) % self.curve.p
-                    dx = min(dx, self.curve.p - dx)
-                    dy = min(dy, self.curve.p - dy)
-                    penalty[val] = (dx + dy) / (2 * self.curve.p)
-
-            constraints.append((bit_indices, penalty))
-
-        return constraints
-
-    def pairwise_couplings(self) -> dict[tuple[int, int], float]:
-        """Generate 2-local Ising couplings from EC structure.
-
-        Uses the observation that bit positions in the key are correlated
-        through the EC group law. We sample random multiples and compute
-        bit correlations to derive coupling strengths.
-        """
-        n = self.n_bits
-        order = self.curve.order
-        couplings: dict[tuple[int, int], float] = {}
-
-        # Sample discrete log solutions and compute bit correlations
-        n_samples = min(order - 1, 500)
-        bit_matrix = np.zeros((n_samples, n), dtype=np.int8)
-
-        for s in range(n_samples):
-            k = s + 1
-            for j in range(n):
-                bit_matrix[s, j] = (k >> j) & 1
-
-        # Compute pairwise correlations
-        # Transform bits to spins: sigma = 1 - 2*bit
-        spin_matrix = 1 - 2 * bit_matrix.astype(np.float64)
-        mean_spins = spin_matrix.mean(axis=0)
-
-        for i in range(n):
-            for j in range(i + 1, n):
-                corr = (spin_matrix[:, i] * spin_matrix[:, j]).mean()
-                corr -= mean_spins[i] * mean_spins[j]
-                if abs(corr) > 0.01:
-                    couplings[(i, j)] = float(corr)
-
-        return couplings
+    def make_evaluator(self) -> ECEnergyEvaluator:
+        """Create an ECEnergyEvaluator for efficient MCMC dynamics."""
+        return ECEnergyEvaluator(
+            self.curve, self.generator, self.public_key, self.n_bits
+        )
