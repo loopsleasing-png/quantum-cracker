@@ -47,6 +47,11 @@
 - [ ] Type annotations + mypy clean
 - [ ] Performance optimization (precomputed SH basis)
 
+## Phase 7: Information Theory Attacks
+- [x] SHA-256 partial input attack (known padding exploitation)
+- [x] EC trace reversibility (side-channel attack model)
+- [x] Information smearing analysis (grand consolidation of reverse attempts)
+
 ---
 
 ## Completed Features
@@ -62,3 +67,6 @@
 | 2026-02-09 | 2D visualization | 5 Matplotlib plot types (12 tests) |
 | 2026-02-09 | 3D renderer | PyOpenGL with GLSL shaders (9 tests) |
 | 2026-02-09 | CLI + integration | Full pipeline with CSV export (6 tests) |
+| 2026-02-14 | SHA-256 partial input attack | 31/64 input bytes known, ~2% speedup, MI classification |
+| 2026-02-14 | EC trace reversibility | 100% key recovery from trace, MI math / ID physical |
+| 2026-02-14 | Information smearing analysis | 12 reverse-fire + 10 prediction + DNA extraction, all MI |
