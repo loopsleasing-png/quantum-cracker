@@ -39,6 +39,13 @@ Check here before re-debating a settled choice.
 **Decision:** Map bit index i to SH order (l, m) where bits fill sequentially: l=0 (1 coeff), l=1 (3 coeffs), l=2 (5 coeffs), etc. Bit value (+1/-1) is the coefficient. Sum weighted SH basis on angular grid, modulate by radial Gaussian.
 **Rationale:** SH basis is natural for spherical data. 256 bits fill up to l=15 (cumulative 256 = 16^2). The mapping preserves spatial structure -- nearby bits in the key map to similar angular patterns.
 
+## ADR-007: C accelerator via ctypes
+**Date:** 2026-02-27
+**Status:** Accepted
+**Context:** The SQA annealing inner loop is bottlenecked by Python overhead in EC point arithmetic and Ising energy evaluation. Each annealing step makes O(P * N) calls to flip_single/peek_flip with dict iteration.
+**Decision:** Implement critical paths in C (`csrc/ec_arith.c`, `csrc/ising_core.c`) compiled to `lib/libqc_accel.so`. Python ctypes wrappers in `src/quantum_cracker/accel/` with transparent fallback to pure Python. Adjacency-list indexing for O(degree) energy deltas instead of O(n_couplings).
+**Rationale:** ctypes requires no build step at import time, no Python.h dependency, and graceful degradation. The SQA sweep kernel (`sqa_sweep`) batches all replica updates into one C call, eliminating millions of Python function calls. 128-bit intermediates handle 64-bit primes without overflow.
+
 ## ADR-006: Expansion rate as fractional growth
 **Date:** 2026-02-09
 **Status:** Accepted

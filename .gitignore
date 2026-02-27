@@ -2,12 +2,18 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
 *.egg-info/
 dist/
 build/
 *.egg
 .eggs/
+
+# C build artifacts
+*.o
+*.so
+csrc/test_ec_arith
+# Keep the built shared library
+!lib/libqc_accel.so
 
 # Virtual environments
 .venv/

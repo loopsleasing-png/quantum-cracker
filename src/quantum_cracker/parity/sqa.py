@@ -228,6 +228,38 @@ class SQAEngine:
 
         return e
 
+    def _try_build_c_model(self) -> object | None:
+        """Build a CIsingModel from the current Hamiltonian, or None."""
+        try:
+            from quantum_cracker.accel._ising import CIsingModel
+            return CIsingModel(
+                n_spins=self.n_spins,
+                h_fields=self.h._h_fields,
+                j_couplings=self.h._j_couplings,
+                constraint_weight=self.h.config.constraint_weight,
+                constraint_diagonal=self.h._constraint_diagonal,
+            )
+        except (ImportError, RuntimeError):
+            return None
+
+    def _try_build_c_evaluators(
+        self, n_replicas: int, rng: np.random.Generator,
+    ) -> list | None:
+        """Build C EC evaluators for each replica, or None."""
+        try:
+            from quantum_cracker.accel._ec_arith import CECEvaluator
+        except (ImportError, RuntimeError):
+            return None
+
+        if not self.replica_evaluators or self.replica_evaluators[0] is None:
+            return None
+
+        # Check if evaluators are already CECEvaluators
+        if isinstance(self.replica_evaluators[0], CECEvaluator):
+            return self.replica_evaluators
+
+        return None
+
     def anneal(
         self,
         schedule: SQASchedule | None = None,
@@ -236,6 +268,9 @@ class SQAEngine:
         rng: np.random.Generator | None = None,
     ) -> SQAResult:
         """Run Simulated Quantum Annealing.
+
+        Uses C-accelerated sweep kernel when available, falling back
+        to pure Python otherwise.
 
         Args:
             schedule: SQA annealing schedule (gamma, beta, replicas)
@@ -256,6 +291,17 @@ class SQAEngine:
         # Parity suppression for single-spin flips
         t1_base = self.config.t1_base
         t2 = self.config.t2
+
+        # Try to build C-accelerated model for sweep kernel
+        c_model = self._try_build_c_model()
+        use_c_sweep = c_model is not None
+        sqa_sweep_c = None
+        if use_c_sweep:
+            try:
+                from quantum_cracker.accel._ising import sqa_sweep_c as _sqa_sweep_c
+                sqa_sweep_c = _sqa_sweep_c
+            except (ImportError, RuntimeError):
+                use_c_sweep = False
 
         best_overall_energy = float("inf")
         best_overall_spins: NDArray[np.int8] | None = None
@@ -292,79 +338,43 @@ class SQAEngine:
                 else:
                     parity_suppression = 0.0
 
-                # Sweep all replicas
-                for r in range(P):
-                    spins_r = self.replica_spins[r]
-                    r_prev = (r - 1) % P
-                    r_next = (r + 1) % P
+                # Use C sweep kernel if available
+                if use_c_sweep and sqa_sweep_c is not None:
+                    # Build C evaluator list from replica_evaluators
+                    c_ec_evs = self.replica_evaluators if (
+                        self.replica_evaluators and
+                        self.replica_evaluators[0] is not None
+                    ) else [None] * P
 
-                    # Per-replica J_perp (parity-weighted or uniform)
-                    if parity_weighted:
-                        jp_r = self._j_perp_parity(
-                            jp_base, replica_parities[r], delta_e,
-                            temperature, P,
-                        )
-                    else:
-                        jp_r = jp_base
+                    sqa_sweep_c(
+                        c_model,
+                        self.replica_spins,
+                        c_ec_evs,
+                        jp_base,
+                        parity_suppression,
+                        beta,
+                        delta_e,
+                        temperature,
+                        parity_weighted,
+                        rng,
+                    )
 
-                    # Single-spin flip proposals (N proposals per replica)
-                    for _ in range(n):
-                        i = int(rng.integers(0, n))
-
-                        # Intra-replica dE scaled by 1/P
-                        dE_intra = self._intra_de_single(r, i) / P
-
-                        # Inter-replica coupling dE
-                        s_i = spins_r[i]
-                        s_prev = self.replica_spins[r_prev][i]
-                        s_next = self.replica_spins[r_next][i]
-                        dE_inter = jp_r * (-2.0) * s_i * (s_prev + s_next)
-
-                        dE = dE_intra + dE_inter
-
-                        # Accept with parity suppression (single flips change parity)
-                        if dE <= 0:
-                            accept_prob = parity_suppression
-                        else:
-                            accept_prob = parity_suppression * np.exp(-beta * dE)
-
-                        if rng.random() < accept_prob:
-                            old_parity = replica_parities[r]
-                            self._apply_single_flip(r, i)
-                            replica_parities[r] *= -1
-                            if replica_parities[r] != old_parity:
-                                total_parity_flips += 1
-
-                    # Pair-spin flip proposals (N proposals per replica)
-                    for _ in range(n):
-                        i = int(rng.integers(0, n))
-                        j = int(rng.integers(0, n))
-                        if i == j:
-                            continue
-
-                        dE_intra = self._intra_de_pair(r, i, j) / P
-
-                        s_i = spins_r[i]
-                        s_j = spins_r[j]
-                        s_prev_i = self.replica_spins[r_prev][i]
-                        s_next_i = self.replica_spins[r_next][i]
-                        s_prev_j = self.replica_spins[r_prev][j]
-                        s_next_j = self.replica_spins[r_next][j]
-                        dE_inter = jp_r * (-2.0) * (
-                            s_i * (s_prev_i + s_next_i)
-                            + s_j * (s_prev_j + s_next_j)
-                        )
-
-                        dE = dE_intra + dE_inter
-
-                        # Pair flips preserve parity -- unsuppressed
-                        if dE <= 0:
-                            accept_prob = 1.0
-                        else:
-                            accept_prob = np.exp(-beta * dE)
-
-                        if rng.random() < accept_prob:
-                            self._apply_pair_flip(r, i, j)
+                    # Update parity tracking
+                    for r in range(P):
+                        replica_parities[r] = compute_parity(self.replica_spins[r])
+                else:
+                    # Pure Python sweep (original implementation)
+                    self._python_sweep(
+                        P, n, parity_weighted, jp_base, delta_e,
+                        temperature, parity_suppression, beta,
+                        replica_parities, total_parity_flips, rng,
+                    )
+                    # Update parity tracking
+                    for r in range(P):
+                        new_p = compute_parity(self.replica_spins[r])
+                        if new_p != replica_parities[r]:
+                            total_parity_flips += 1
+                        replica_parities[r] = new_p
 
                 # Log trajectory periodically
                 if step % max(schedule.n_steps // 20, 1) == 0:
@@ -422,6 +432,86 @@ class SQAEngine:
             n_parity_flips=total_parity_flips,
             trajectory=trajectory,
         )
+
+    def _python_sweep(
+        self,
+        P: int, n: int, parity_weighted: bool,
+        jp_base: float, delta_e: float, temperature: float,
+        parity_suppression: float, beta: float,
+        replica_parities: list[int],
+        total_parity_flips: int,
+        rng: np.random.Generator,
+    ) -> None:
+        """Run one SQA sweep step in pure Python (fallback)."""
+        for r in range(P):
+            spins_r = self.replica_spins[r]
+            r_prev = (r - 1) % P
+            r_next = (r + 1) % P
+
+            # Per-replica J_perp (parity-weighted or uniform)
+            if parity_weighted:
+                jp_r = self._j_perp_parity(
+                    jp_base, replica_parities[r], delta_e,
+                    temperature, P,
+                )
+            else:
+                jp_r = jp_base
+
+            # Single-spin flip proposals (N proposals per replica)
+            for _ in range(n):
+                i = int(rng.integers(0, n))
+
+                # Intra-replica dE scaled by 1/P
+                dE_intra = self._intra_de_single(r, i) / P
+
+                # Inter-replica coupling dE
+                s_i = spins_r[i]
+                s_prev = self.replica_spins[r_prev][i]
+                s_next = self.replica_spins[r_next][i]
+                dE_inter = jp_r * (-2.0) * s_i * (s_prev + s_next)
+
+                dE = dE_intra + dE_inter
+
+                # Accept with parity suppression (single flips change parity)
+                if dE <= 0:
+                    accept_prob = parity_suppression
+                else:
+                    accept_prob = parity_suppression * np.exp(-beta * dE)
+
+                if rng.random() < accept_prob:
+                    self._apply_single_flip(r, i)
+                    replica_parities[r] *= -1
+
+            # Pair-spin flip proposals (N proposals per replica)
+            for _ in range(n):
+                i = int(rng.integers(0, n))
+                j = int(rng.integers(0, n))
+                if i == j:
+                    continue
+
+                dE_intra = self._intra_de_pair(r, i, j) / P
+
+                s_i = spins_r[i]
+                s_j = spins_r[j]
+                s_prev_i = self.replica_spins[r_prev][i]
+                s_next_i = self.replica_spins[r_next][i]
+                s_prev_j = self.replica_spins[r_prev][j]
+                s_next_j = self.replica_spins[r_next][j]
+                dE_inter = jp_r * (-2.0) * (
+                    s_i * (s_prev_i + s_next_i)
+                    + s_j * (s_prev_j + s_next_j)
+                )
+
+                dE = dE_intra + dE_inter
+
+                # Pair flips preserve parity -- unsuppressed
+                if dE <= 0:
+                    accept_prob = 1.0
+                else:
+                    accept_prob = np.exp(-beta * dE)
+
+                if rng.random() < accept_prob:
+                    self._apply_pair_flip(r, i, j)
 
     def _majority_vote_key(self, replicas: list[NDArray[np.int8]]) -> int:
         """Extract key via per-bit majority vote across all replicas."""

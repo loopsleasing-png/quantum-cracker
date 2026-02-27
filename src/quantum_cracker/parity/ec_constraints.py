@@ -588,7 +588,22 @@ class ECConstraintEncoder:
         return spin_penalty
 
     def make_evaluator(self) -> ECEnergyEvaluator:
-        """Create an ECEnergyEvaluator for efficient MCMC dynamics."""
+        """Create an ECEnergyEvaluator for efficient MCMC dynamics.
+
+        Returns a C-accelerated evaluator when available, otherwise
+        falls back to the pure Python implementation.
+        """
+        try:
+            from quantum_cracker.accel._ec_arith import CECEvaluator
+
+            gx, gy = self.generator
+            px, py = self.public_key
+            return CECEvaluator(  # type: ignore[return-value]
+                self.curve.p, self.curve.a, self.curve.b,
+                gx, gy, px, py, self.n_bits,
+            )
+        except (ImportError, RuntimeError):
+            pass
         return ECEnergyEvaluator(
             self.curve, self.generator, self.public_key, self.n_bits
         )

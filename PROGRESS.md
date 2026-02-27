@@ -45,6 +45,7 @@
 ## Phase 6: Polish
 - [ ] CI/CD pipeline
 - [ ] Type annotations + mypy clean
+- [x] C accelerator for EC arithmetic and Ising MCMC (ctypes + libqc_accel.so)
 - [ ] Performance optimization (precomputed SH basis)
 
 ## Phase 7: Information Theory Attacks
@@ -72,3 +73,4 @@
 | 2026-02-14 | EC trace reversibility | 100% key recovery from trace, MI math / ID physical |
 | 2026-02-14 | Information smearing analysis | 12 reverse-fire + 10 prediction + DNA extraction, all MI |
 | 2026-02-14 | SQA information theory | All 3 attacks through SQA engine, flat energy landscape confirmed |
+| 2026-02-27 | C accelerator layer | EC arithmetic + Ising MCMC in C via ctypes, 222 tests pass (14 new) |
